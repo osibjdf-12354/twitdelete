@@ -1,0 +1,3 @@
+requests>=2.31.0
+browser-cookie3>=0.20.1
+websocket-client>=1.8.0

@@ -1,0 +1,8 @@
+{
+  "access_token": "x_oauth2_user_access_token_here",
+  "refresh_token": "optional_refresh_token_here",
+  "cookie": "auth_token=...; ct0=...; ...",
+  "csrf_token": "...",
+  "bearer_token": "",
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+}
