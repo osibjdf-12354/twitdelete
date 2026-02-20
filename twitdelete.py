@@ -8,6 +8,8 @@ import email.utils
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -50,6 +52,8 @@ class TweetMeta:
     author_id: str | None
     text: str | None
     created_ts: int | None
+    has_media: bool = False
+    conversation_id: str | None = None
 
 
 @dataclass
@@ -67,6 +71,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--timeline-pages", type=int, default=8)
     p.add_argument("--timeline-page-size", type=int, default=40)
     p.add_argument("--include-replies", action="store_true")
+    p.add_argument(
+        "--media-tab",
+        action="store_true",
+        help="Use profile media timeline source (UserMedia).",
+    )
+    p.add_argument(
+        "--media-delete-conversation",
+        action="store_true",
+        help="When --media-tab is used, also delete your own tweets in the same conversation thread.",
+    )
     p.add_argument("--max", type=int, default=0)
     p.add_argument(
         "--delete-all",
@@ -120,6 +134,25 @@ def parse_args() -> argparse.Namespace:
         "--cdp-url",
         default="",
         help="Optional Chrome DevTools endpoint, e.g. http://127.0.0.1:9222 (fallback for Brave).",
+    )
+    p.add_argument(
+        "--cdp-user-data-dir",
+        default="",
+        help=(
+            "User-data-dir for auto-launched Edge CDP profile "
+            "(default: %%LOCALAPPDATA%%\\twitdelete-edge-cdp-profile)."
+        ),
+    )
+    p.add_argument(
+        "--cdp-open-wait",
+        type=float,
+        default=15.0,
+        help="Seconds to wait for CDP endpoint after auto-launching Edge (default: 15).",
+    )
+    p.add_argument(
+        "--no-auto-open-cdp",
+        action="store_true",
+        help="Disable auto-launching Edge when CDP endpoint is unreachable.",
     )
 
     p.add_argument("--before", help="UTC date/time, e.g. 2024-01-01")
@@ -176,6 +209,14 @@ def parse_twitter_created_at(raw: Any) -> int | None:
         return int(datetime.strptime(raw, "%a %b %d %H:%M:%S %z %Y").timestamp())
     except ValueError:
         return None
+
+
+def tweet_legacy_has_media(legacy: dict[str, Any]) -> bool:
+    entities = legacy.get("entities") if isinstance(legacy.get("entities"), dict) else {}
+    ext_entities = legacy.get("extended_entities") if isinstance(legacy.get("extended_entities"), dict) else {}
+    media_entities = entities.get("media") if isinstance(entities.get("media"), list) else []
+    media_ext = ext_entities.get("media") if isinstance(ext_entities.get("media"), list) else []
+    return bool(media_entities or media_ext)
 
 
 def coerce_tweet_id(value: Any) -> str | None:
@@ -303,6 +344,104 @@ def normalize_cdp_url(raw: str) -> str:
     if not (url.startswith("http://") or url.startswith("https://")):
         url = "http://" + url
     return url.rstrip("/")
+
+
+def cdp_host_port(cdp_url: str) -> tuple[str, int]:
+    base = normalize_cdp_url(cdp_url)
+    parsed = urllib.parse.urlparse(base)
+    host = parsed.hostname or "127.0.0.1"
+    if parsed.port:
+        return host, parsed.port
+    return host, (443 if parsed.scheme == "https" else 80)
+
+
+def is_cdp_reachable(cdp_url: str, timeout: float) -> bool:
+    base = normalize_cdp_url(cdp_url)
+    try:
+        res = requests.get(f"{base}/json", timeout=max(1.0, timeout))
+        if res.status_code != 200:
+            return False
+        return isinstance(res.json(), list)
+    except Exception:
+        return False
+
+
+def wait_for_cdp(cdp_url: str, wait_seconds: float) -> bool:
+    end = time.time() + max(1.0, wait_seconds)
+    while time.time() < end:
+        if is_cdp_reachable(cdp_url, timeout=1.5):
+            return True
+        time.sleep(0.35)
+    return False
+
+
+def find_edge_executable() -> str | None:
+    candidates = [
+        shutil.which("msedge"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+        os.path.join(os.environ.get("ProgramFiles", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+def default_edge_cdp_user_data_dir() -> str:
+    local = os.environ.get("LOCALAPPDATA", "").strip()
+    if local:
+        return os.path.join(local, "twitdelete-edge-cdp-profile")
+    return os.path.join(os.getcwd(), "twitdelete-edge-cdp-profile")
+
+
+def auto_open_edge_cdp(
+    cdp_url: str,
+    *,
+    user_data_dir: str,
+    wait_seconds: float,
+    target_url: str = "https://x.com/home",
+) -> tuple[str, str]:
+    host, port = cdp_host_port(cdp_url)
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        raise ValueError(f"Auto-open supports local CDP host only: {host}")
+
+    edge_exe = find_edge_executable()
+    if not edge_exe:
+        raise ValueError("Could not find Edge executable (msedge.exe)")
+
+    profile_dir = user_data_dir.strip() if user_data_dir.strip() else default_edge_cdp_user_data_dir()
+    os.makedirs(profile_dir, exist_ok=True)
+
+    cmd = [
+        edge_exe,
+        f"--remote-debugging-port={port}",
+        "--remote-allow-origins=*",
+        f"--user-data-dir={profile_dir}",
+        target_url,
+    ]
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as exc:
+        raise ValueError(f"Failed to launch Edge CDP window: {exc}") from exc
+
+    if not wait_for_cdp(cdp_url, wait_seconds=wait_seconds):
+        raise ValueError(f"CDP endpoint did not open in time ({wait_seconds:.0f}s): {normalize_cdp_url(cdp_url)}")
+    return edge_exe, profile_dir
+
+
+def should_auto_open_cdp(exc: Exception, browser: str) -> bool:
+    # Only auto-open for Edge path (or auto mode which prefers Edge).
+    if browser not in {"auto", "edge"}:
+        return False
+    msg = str(exc)
+    hints = [
+        "Cannot connect to CDP endpoint",
+        "Failed to establish a new connection",
+        "Max retries exceeded",
+        "connection refused",
+        "WinError 10061",
+    ]
+    return any(h.lower() in msg.lower() for h in hints)
 
 
 def pick_cdp_target(targets: list[dict[str, Any]]) -> dict[str, Any]:
@@ -501,7 +640,30 @@ def load_auth(args: argparse.Namespace) -> AuthConfig:
                     csrf = auto_csrf
                 print(f"[INFO] Auto auth loaded via CDP: {source}")
             except Exception as exc:
-                auth_errors.append(f"CDP: {exc}")
+                latest_cdp_exc: Exception = exc
+                if not args.no_auto_open_cdp and should_auto_open_cdp(exc, args.browser):
+                    try:
+                        edge_exe, profile_dir = auto_open_edge_cdp(
+                            args.cdp_url,
+                            user_data_dir=args.cdp_user_data_dir,
+                            wait_seconds=args.cdp_open_wait,
+                            target_url="https://x.com/home",
+                        )
+                        print(
+                            f"[INFO] CDP endpoint unavailable. Auto-opened Edge CDP window: {edge_exe} "
+                            f"(profile: {profile_dir})"
+                        )
+                        auto_cookie, auto_csrf, source = load_auth_from_cdp(args.cdp_url, args.timeout)
+                        if not cookie:
+                            cookie = auto_cookie
+                        if not csrf:
+                            csrf = auto_csrf
+                        print(f"[INFO] Auto auth loaded via CDP: {source}")
+                        latest_cdp_exc = None  # type: ignore[assignment]
+                    except Exception as auto_exc:
+                        latest_cdp_exc = ValueError(f"{exc} | auto-open failed: {auto_exc}")
+                if latest_cdp_exc is not None:
+                    auth_errors.append(f"CDP: {latest_cdp_exc}")
 
         if not cookie or not csrf:
             try:
@@ -715,6 +877,8 @@ def parse_tweet(node: Any) -> TweetMeta | None:
     if text is None and isinstance(legacy.get("text"), str):
         text = legacy.get("text")
     created = parse_twitter_created_at(legacy.get("created_at"))
+    has_media = tweet_legacy_has_media(legacy)
+    conversation_id = coerce_tweet_id(legacy.get("conversation_id_str"))
 
     author = None
     author_id = coerce_tweet_id(legacy.get("user_id_str"))
@@ -730,7 +894,15 @@ def parse_tweet(node: Any) -> TweetMeta | None:
         elif isinstance(ucore.get("screen_name"), str):
             author = ucore.get("screen_name")
 
-    return TweetMeta(tweet_id=tid, author=author, author_id=author_id, text=text, created_ts=created)
+    return TweetMeta(
+        tweet_id=tid,
+        author=author,
+        author_id=author_id,
+        text=text,
+        created_ts=created,
+        has_media=has_media,
+        conversation_id=conversation_id,
+    )
 
 
 def extract_tweets(payload: dict[str, Any], viewer_id: str, viewer_name: str) -> list[TweetMeta]:
@@ -760,6 +932,47 @@ def extract_tweets(payload: dict[str, Any], viewer_id: str, viewer_name: str) ->
 
     walk(payload)
     return list(out.values())
+
+
+def build_tweet_detail_variables(tweet_id: str) -> dict[str, Any]:
+    return {
+        "focalTweetId": tweet_id,
+        "referrer": "profile",
+        "with_rux_injections": False,
+        "includePromotedContent": True,
+        "withCommunity": True,
+        "withQuickPromoteEligibilityTweetFields": True,
+        "withBirdwatchNotes": True,
+        "withVoice": True,
+    }
+
+
+def load_media_conversation_tweets(
+    session: requests.Session,
+    auth: AuthConfig,
+    op_tweet_detail: GraphQLOperation,
+    *,
+    media_tweet: TweetMeta,
+    viewer_id: str,
+    viewer_name: str,
+    timeout: float,
+) -> list[TweetMeta]:
+    payload = graphql_get(
+        session,
+        auth,
+        op_tweet_detail,
+        variables=build_tweet_detail_variables(media_tweet.tweet_id),
+        timeout=timeout,
+    )
+    out: list[TweetMeta] = []
+    for t in extract_tweets(payload, viewer_id, viewer_name):
+        if t.tweet_id == media_tweet.tweet_id:
+            continue
+        # Keep only tweets in the same conversation to mirror "below conversation history".
+        if media_tweet.conversation_id and t.conversation_id and t.conversation_id != media_tweet.conversation_id:
+            continue
+        out.append(t)
+    return out
 
 
 def extract_bottom_cursor(payload: dict[str, Any]) -> str | None:
@@ -964,21 +1177,33 @@ def main() -> int:
 
     session = requests.Session()
 
-    timeline_name = "UserTweetsAndReplies" if args.include_replies else "UserTweets"
-    optional_ops = ["DeleteTweet"]
-    if args.include_replies:
-        optional_ops.append("UserTweets")
+    optional_ops = ["DeleteTweet", "UserTweetsAndReplies", "UserMedia", "TweetDetail"]
 
     try:
         ops = discover_graphql_operations(
             session,
             timeout=args.timeout,
-            required=["Viewer", timeline_name],
+            required=["Viewer", "UserTweets"],
             optional=optional_ops,
         )
     except Exception as exc:
         print(f"[ERROR] Failed to discover X operations: {exc}", file=sys.stderr)
         return 2
+
+    if args.media_tab:
+        if "UserMedia" in ops:
+            timeline_name = "UserMedia"
+        else:
+            timeline_name = "UserTweets"
+            print("[WARN] UserMedia operation not found. Falling back to UserTweets with media filter.")
+    elif args.include_replies:
+        if "UserTweetsAndReplies" in ops:
+            timeline_name = "UserTweetsAndReplies"
+        else:
+            timeline_name = "UserTweets"
+            print("[WARN] UserTweetsAndReplies operation not found. Falling back to UserTweets.")
+    else:
+        timeline_name = "UserTweets"
 
     try:
         viewer_payload = graphql_get(session, auth, ops["Viewer"], variables={}, timeout=args.timeout)
@@ -993,7 +1218,7 @@ def main() -> int:
     viewer_id, viewer_name = viewer
     print(f"[INFO] Logged-in user: @{viewer_name} ({viewer_id})")
 
-    if args.include_replies and args.cdp_url:
+    if timeline_name == "UserTweetsAndReplies" and args.cdp_url:
         try:
             op_xctid, op_lang = load_transaction_id_from_cdp(
                 args.cdp_url,
@@ -1008,6 +1233,21 @@ def main() -> int:
         except Exception as exc:
             print(f"[WARN] Could not capture UserTweetsAndReplies transaction id: {exc}")
 
+    if args.media_tab and timeline_name == "UserMedia" and args.cdp_url:
+        try:
+            op_xctid, op_lang = load_transaction_id_from_cdp(
+                args.cdp_url,
+                args.timeout,
+                target_url=f"https://x.com/{viewer_name}/media",
+                operation_name="UserMedia",
+            )
+            auth.x_client_transaction_id = op_xctid
+            if not args.client_language:
+                auth.x_twitter_client_language = op_lang
+            print("[INFO] Captured UserMedia transaction id via CDP")
+        except Exception as exc:
+            print(f"[WARN] Could not capture UserMedia transaction id: {exc}")
+
     if args.author:
         print(f"[INFO] Filter author: {args.author}")
     if args.contains:
@@ -1016,6 +1256,12 @@ def main() -> int:
         print(f"[INFO] Filter before: {format_ts(before_ts)}")
     if after_ts is not None:
         print(f"[INFO] Filter after : {format_ts(after_ts)}")
+    if args.media_tab:
+        print("[INFO] Source: Media tab")
+    if args.media_delete_conversation and not args.media_tab:
+        print("[WARN] --media-delete-conversation requires --media-tab. Ignoring.")
+    elif args.media_delete_conversation:
+        print("[INFO] Media mode: include same-conversation tweets under media items")
     print(f"[INFO] Mode: {'DRY-RUN' if args.dry_run else 'DELETE'}")
     if args.delete_all:
         print(
@@ -1034,8 +1280,10 @@ def main() -> int:
     page_size = max(1, min(args.timeline_page_size, 100))
     pages = max(1, args.timeline_pages)
 
+    media_filter_mode = args.media_tab
+
     def load_batch(limit: int) -> list[TweetMeta] | None:
-        nonlocal timeline_name
+        nonlocal timeline_name, media_filter_mode
 
         collected: list[TweetMeta] = []
         seen: set[str] = set()
@@ -1064,6 +1312,11 @@ def main() -> int:
                     and timeline_name == "UserTweetsAndReplies"
                     and status == 404
                 )
+                is_media_404 = (
+                    args.media_tab
+                    and timeline_name == "UserMedia"
+                    and status == 404
+                )
 
                 # Stale x-client-transaction-id can trigger 404 for UserTweetsAndReplies.
                 # Refresh it from CDP and retry once before falling back.
@@ -1086,6 +1339,25 @@ def main() -> int:
                         status = extract_http_status_from_error(latest_exc)
                         print(f"[WARN] UserTweetsAndReplies retry after transaction-id refresh failed: {retry_exc}")
 
+                if is_media_404 and args.cdp_url:
+                    try:
+                        op_xctid, op_lang = load_transaction_id_from_cdp(
+                            args.cdp_url,
+                            args.timeout,
+                            target_url=f"https://x.com/{viewer_name}/media",
+                            operation_name="UserMedia",
+                        )
+                        auth.x_client_transaction_id = op_xctid
+                        if not args.client_language:
+                            auth.x_twitter_client_language = op_lang
+                        print("[INFO] Refreshed UserMedia transaction id via CDP after 404")
+                        payload = graphql_get(session, auth, ops[timeline_name], variables=variables, timeout=args.timeout)
+                        recovered = True
+                    except Exception as retry_exc:
+                        latest_exc = retry_exc
+                        status = extract_http_status_from_error(latest_exc)
+                        print(f"[WARN] UserMedia retry after transaction-id refresh failed: {retry_exc}")
+
                 if (
                     not recovered
                     and args.include_replies
@@ -1104,11 +1376,32 @@ def main() -> int:
                         print(f"[ERROR] Failed to load timeline page {page}: {exc2}", file=sys.stderr)
                         return None
 
+                if (
+                    not recovered
+                    and args.media_tab
+                    and timeline_name == "UserMedia"
+                    and status == 404
+                    and "UserTweets" in ops
+                ):
+                    timeline_name = "UserTweets"
+                    media_filter_mode = True
+                    print("[WARN] UserMedia unavailable (404). Falling back to UserTweets with media filter.")
+                    try:
+                        payload = graphql_get(
+                            session, auth, ops[timeline_name], variables=variables, timeout=args.timeout
+                        )
+                        recovered = True
+                    except Exception as exc2:
+                        print(f"[ERROR] Failed to load timeline page {page}: {exc2}", file=sys.stderr)
+                        return None
+
                 if not recovered:
                     print(f"[ERROR] Failed to load timeline page {page}: {latest_exc}", file=sys.stderr)
                     return None
 
             page_tweets = extract_tweets(payload, viewer_id, viewer_name)
+            if media_filter_mode:
+                page_tweets = [t for t in page_tweets if t.has_media]
             added = 0
             for m in page_tweets:
                 if m.tweet_id in seen:
@@ -1165,6 +1458,51 @@ def main() -> int:
                 return 2
             print("[INFO] No more visible tweets found. Stopping.")
             break
+
+        if args.media_tab and args.media_delete_conversation:
+            if "TweetDetail" not in ops:
+                print("[WARN] TweetDetail operation not found. Skipping media conversation expansion.")
+            else:
+                batch_seen = {m.tweet_id for m in collected}
+                seed_media = [m for m in collected if m.has_media]
+                extras: list[TweetMeta] = []
+                for idx, media_tweet in enumerate(seed_media, start=1):
+                    try:
+                        related = load_media_conversation_tweets(
+                            session,
+                            auth,
+                            ops["TweetDetail"],
+                            media_tweet=media_tweet,
+                            viewer_id=viewer_id,
+                            viewer_name=viewer_name,
+                            timeout=args.timeout,
+                        )
+                    except Exception as exc:
+                        print(f"[WARN] Media conversation load failed ({idx}/{len(seed_media)}): {exc}")
+                        continue
+
+                    added_related = 0
+                    for t in related:
+                        if t.tweet_id in batch_seen:
+                            continue
+                        batch_seen.add(t.tweet_id)
+                        extras.append(t)
+                        added_related += 1
+                    if added_related > 0:
+                        print(
+                            f"[INFO] Media conversation {idx}/{len(seed_media)}: +{added_related} own tweets"
+                        )
+
+                if extras:
+                    if args.max > 0:
+                        remaining_cap = max(0, args.max - considered - len(collected))
+                        if remaining_cap <= 0:
+                            extras = []
+                        elif len(extras) > remaining_cap:
+                            extras = extras[:remaining_cap]
+                    if extras:
+                        collected.extend(extras)
+                        print(f"[INFO] Media conversation expansion: +{len(extras)} tweets (batch total {len(collected)})")
 
         total = len(collected)
         batch_deleted = 0

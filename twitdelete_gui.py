@@ -73,6 +73,8 @@ class TwitDeleteGui(tk.Tk):
 
         self.include_replies_var = tk.BooleanVar(value=True)
         self.delete_all_var = tk.BooleanVar(value=True)
+        self.media_tab_var = tk.BooleanVar(value=False)
+        self.media_delete_conversation_var = tk.BooleanVar(value=False)
         self.dry_run_var = tk.BooleanVar(value=False)
 
         self.command_preview_var = tk.StringVar()
@@ -123,6 +125,12 @@ class TwitDeleteGui(tk.Tk):
 
         checks = ttk.Frame(opts)
         checks.grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(checks, text="media tab", variable=self.media_tab_var).pack(side="left")
+        ttk.Checkbutton(
+            checks,
+            text="media conversation",
+            variable=self.media_delete_conversation_var,
+        ).pack(side="left", padx=(12, 0))
         ttk.Checkbutton(checks, text="include replies", variable=self.include_replies_var).pack(side="left")
         ttk.Checkbutton(checks, text="delete all", variable=self.delete_all_var).pack(side="left", padx=(12, 0))
         ttk.Checkbutton(checks, text="dry run", variable=self.dry_run_var).pack(side="left", padx=(12, 0))
@@ -168,6 +176,8 @@ class TwitDeleteGui(tk.Tk):
             self.before_var,
             self.after_var,
             self.contains_var,
+            self.media_tab_var,
+            self.media_delete_conversation_var,
             self.include_replies_var,
             self.delete_all_var,
             self.dry_run_var,
@@ -249,6 +259,10 @@ class TwitDeleteGui(tk.Tk):
             cmd.append("--include-replies")
         if self.delete_all_var.get():
             cmd.append("--delete-all")
+        if self.media_tab_var.get():
+            cmd.append("--media-tab")
+        if self.media_delete_conversation_var.get():
+            cmd.append("--media-delete-conversation")
         if self.dry_run_var.get():
             cmd.append("--dry-run")
 

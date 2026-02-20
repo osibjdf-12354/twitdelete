@@ -29,6 +29,8 @@ python twitdelete_gui.py
 - 하단 `실행 로그` 창에 실행 출력이 계속 표시됩니다.
 - `실행` / `중지` 버튼으로 제어
 - GUI에서 `dry run` 체크 시 후보만 출력하고 삭제는 하지 않습니다.
+- GUI에서 `media tab` 체크 시 미디어 탭 기준으로 삭제 대상을 조회합니다.
+- GUI에서 `media conversation` 체크 시 미디어 글 아래 같은 대화 스레드의 내 글도 함께 삭제합니다.
 - 실행 시 모드에 따라 확인 팝업이 표시됩니다(실삭제/DRY-RUN).
 
 ### GUI EXE 빌드
@@ -151,5 +153,22 @@ python twitdelete.py --auto-auth --browser edge --cdp-url http://127.0.0.1:9222 
 현재 스크립트는 `--cdp-url`이 있으면 브라우저 네트워크에서 이 값을 자동 캡처해 사용합니다.
 실행 중 `UserTweetsAndReplies`가 404를 반환하면 transaction id를 CDP에서 1회 재캡처 후 재시도하고,
 그래도 404면 `UserTweets`로 폴백합니다.
+
+CDP가 꺼져 있으면(예: `http://127.0.0.1:9222` 연결 거부) `--auto-auth` 경로에서 Edge CDP 창을 자동으로 띄운 뒤 재시도합니다.
+- 기본 프로필 경로: `%LOCALAPPDATA%\twitdelete-edge-cdp-profile`
+- 끄기: `--no-auto-open-cdp`
+- 자동 실행 프로필 경로 지정: `--cdp-user-data-dir`
+
+미디어 탭 삭제:
+
+```bash
+python twitdelete.py --auto-auth --browser edge --cdp-url http://127.0.0.1:9222 --media-tab --delete-all
+```
+
+미디어 탭 + 같은 대화 기록까지 삭제:
+
+```bash
+python twitdelete.py --auto-auth --browser edge --cdp-url http://127.0.0.1:9222 --media-tab --media-delete-conversation --delete-all
+```
 
 필요할 때만 사용하고, 가능하면 `twitdelete_official.py`를 권장합니다.
