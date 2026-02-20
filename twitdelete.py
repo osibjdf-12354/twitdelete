@@ -1279,6 +1279,11 @@ def main() -> int:
 
     page_size = max(1, min(args.timeline_page_size, 100))
     pages = max(1, args.timeline_pages)
+    if args.batch_limit > 0 and page_size > args.batch_limit:
+        print(
+            f"[INFO] batch-limit ({args.batch_limit}) is lower than timeline-page-size ({page_size}); "
+            f"per-pass seed fetch is capped by batch-limit."
+        )
 
     media_filter_mode = args.media_tab
 
@@ -1448,8 +1453,17 @@ def main() -> int:
         else:
             batch_limit = remaining
 
+        seed_batch_limit = batch_limit
+        if args.media_tab and args.media_delete_conversation and batch_limit > 0:
+            # Keep room for conversation-expansion tweets while respecting total batch cap.
+            seed_batch_limit = max(1, batch_limit // 2)
+            print(
+                f"[INFO] Media conversation mode: seed batch limit {seed_batch_limit} "
+                f"(total cap {batch_limit})"
+            )
+
         print(f"[INFO] Starting pass {pass_no}")
-        collected = load_batch(batch_limit)
+        collected = load_batch(seed_batch_limit)
         if collected is None:
             return 2
         if not collected:
@@ -1463,10 +1477,22 @@ def main() -> int:
             if "TweetDetail" not in ops:
                 print("[WARN] TweetDetail operation not found. Skipping media conversation expansion.")
             else:
+                extra_cap: int | None = None
+                if batch_limit > 0:
+                    extra_cap = max(0, batch_limit - len(collected))
+                if args.max > 0:
+                    max_cap = max(0, args.max - considered - len(collected))
+                    extra_cap = min(extra_cap, max_cap) if extra_cap is not None else max_cap
+
+                if extra_cap is not None and extra_cap <= 0:
+                    print("[INFO] Media conversation expansion skipped: no remaining capacity in this pass.")
+
                 batch_seen = {m.tweet_id for m in collected}
                 seed_media = [m for m in collected if m.has_media]
                 extras: list[TweetMeta] = []
                 for idx, media_tweet in enumerate(seed_media, start=1):
+                    if extra_cap is not None and len(extras) >= extra_cap:
+                        break
                     try:
                         related = load_media_conversation_tweets(
                             session,
@@ -1483,6 +1509,8 @@ def main() -> int:
 
                     added_related = 0
                     for t in related:
+                        if extra_cap is not None and len(extras) >= extra_cap:
+                            break
                         if t.tweet_id in batch_seen:
                             continue
                         batch_seen.add(t.tweet_id)
@@ -1494,15 +1522,8 @@ def main() -> int:
                         )
 
                 if extras:
-                    if args.max > 0:
-                        remaining_cap = max(0, args.max - considered - len(collected))
-                        if remaining_cap <= 0:
-                            extras = []
-                        elif len(extras) > remaining_cap:
-                            extras = extras[:remaining_cap]
-                    if extras:
-                        collected.extend(extras)
-                        print(f"[INFO] Media conversation expansion: +{len(extras)} tweets (batch total {len(collected)})")
+                    collected.extend(extras)
+                    print(f"[INFO] Media conversation expansion: +{len(extras)} tweets (batch total {len(collected)})")
 
         total = len(collected)
         batch_deleted = 0

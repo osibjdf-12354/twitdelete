@@ -257,7 +257,7 @@ class TwitDeleteGui(tk.Tk):
 
         if self.include_replies_var.get():
             cmd.append("--include-replies")
-        if self.delete_all_var.get():
+        if self.delete_all_var.get() or self.media_tab_var.get() or self.media_delete_conversation_var.get():
             cmd.append("--delete-all")
         if self.media_tab_var.get():
             cmd.append("--media-tab")
@@ -375,6 +375,8 @@ class TwitDeleteGui(tk.Tk):
         self._set_running_state(True)
         self._append_log("")
         self._append_log("==== RUN ====")
+        if (self.media_tab_var.get() or self.media_delete_conversation_var.get()) and not self.delete_all_var.get():
+            self._append_log("[INFO] media mode forces --delete-all for continuous capture/delete.")
         self._append_log(subprocess.list2cmdline(cmd))
 
         try:

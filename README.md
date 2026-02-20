@@ -31,6 +31,7 @@ python twitdelete_gui.py
 - GUI에서 `dry run` 체크 시 후보만 출력하고 삭제는 하지 않습니다.
 - GUI에서 `media tab` 체크 시 미디어 탭 기준으로 삭제 대상을 조회합니다.
 - GUI에서 `media conversation` 체크 시 미디어 글 아래 같은 대화 스레드의 내 글도 함께 삭제합니다.
+- GUI에서 `media tab` 또는 `media conversation`을 켜면 `delete all`이 자동 적용됩니다.
 - 실행 시 모드에 따라 확인 팝업이 표시됩니다(실삭제/DRY-RUN).
 
 ### GUI EXE 빌드
@@ -170,5 +171,8 @@ python twitdelete.py --auto-auth --browser edge --cdp-url http://127.0.0.1:9222 
 ```bash
 python twitdelete.py --auto-auth --browser edge --cdp-url http://127.0.0.1:9222 --media-tab --media-delete-conversation --delete-all
 ```
+
+`--media-delete-conversation`을 쓸 때도 `--batch-limit`은 패스당 총 처리량으로 적용됩니다.
+기본 구현은 conversation 확장 여유를 남기기 위해 seed 로딩을 `batch-limit`의 절반으로 시작합니다.
 
 필요할 때만 사용하고, 가능하면 `twitdelete_official.py`를 권장합니다.
